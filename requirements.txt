@@ -8,8 +8,8 @@ twilio==9.3.7
 # STT
 deepgram-sdk==3.7.7
 
-# TTS
-elevenlabs==1.9.0
+# TTS — Deepgram Aura (uses same DEEPGRAM_API_KEY as STT; no extra dep needed,
+# we hit the REST endpoint directly with httpx)
 
 # LLM
 groq==0.13.0

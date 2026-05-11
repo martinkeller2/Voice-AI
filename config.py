@@ -7,12 +7,12 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_PHONE_NUMBER: str = ""
 
-    # Deepgram (STT)
+    # Deepgram (STT + TTS — same API key for both)
     DEEPGRAM_API_KEY: str = ""
-
-    # ElevenLabs (TTS)
+    DEEPGRAM_TTS_MODEL: str = "aura-asteria-en"  # professional female voice
+    # ── Legacy / optional ── retained so older .env files don't error out
     ELEVENLABS_API_KEY: str = ""
-    ELEVENLABS_VOICE_ID: str = "21m00Tcm4TlvDq8ikWAM"  # Rachel — professional, warm
+    ELEVENLABS_VOICE_ID: str = ""
 
     # Groq (LLM)
     GROQ_API_KEY: str = ""
