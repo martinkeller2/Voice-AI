@@ -8,10 +8,10 @@ An inbound voice call agent that helps homeowners diagnose appliance problems an
 Caller ──── Twilio ──── FastAPI (WebSocket)
                             │
                      ┌──────┴───────┐
-                  Deepgram       ElevenLabs
-                  (STT)          (TTS)
+                Deepgram STT     Deepgram TTS
+                (nova-2)         (aura-asteria-en)
                      │              │
-                     └──── Groq -───┘
+                     └──── Groq ────┘
                            (LLM + tools)
                                 │
                            PostgreSQL
@@ -22,7 +22,7 @@ Caller ──── Twilio ──── FastAPI (WebSocket)
 
 ### Prerequisites
 - Docker + Docker Compose
-- Accounts for: Twilio, Deepgram, ElevenLabs, Groq
+- Accounts for: Twilio, Deepgram (used for both STT and TTS), Groq
 - `ngrok` (for local development) **or** a server with a public HTTPS URL
 
 ### 1. Configure environment
@@ -82,7 +82,7 @@ curl http://localhost:8000/health
 │   └── session.py          # Per-call state: conversation history, collected info, queues
 ├── services/
 │   ├── llm.py              # Groq tool-use loop
-│   └── tts.py              # ElevenLabs → PCM 16 kHz → mulaw 8 kHz conversion
+│   └── tts.py              # Deepgram Aura → mulaw 8 kHz (native, no conversion)
 └── routers/
     └── twilio_router.py    # POST /incoming-call + WebSocket /media-stream
 ```
@@ -116,9 +116,8 @@ Seed data covers **10 technicians** across Chicago-area zip codes (60601–60660
 | `TWILIO_ACCOUNT_SID` | Twilio account SID |
 | `TWILIO_AUTH_TOKEN` | Twilio auth token |
 | `TWILIO_PHONE_NUMBER` | Your Twilio phone number |
-| `DEEPGRAM_API_KEY` | Deepgram API key (STT) |
-| `ELEVENLABS_API_KEY` | ElevenLabs API key (TTS) |
-| `ELEVENLABS_VOICE_ID` | ElevenLabs voice ID (default: Sarah) |
+| `DEEPGRAM_API_KEY` | Deepgram API key (used for both STT and TTS) |
+| `DEEPGRAM_TTS_MODEL` | Aura TTS voice — default `aura-asteria-en` |
 | `GROQ_API_KEY` | Groq API key |
 | `BASE_URL` | Public HTTPS URL (ngrok or production) |
 | `DATABASE_URL` | PostgreSQL async URL (set automatically by Compose) |
@@ -140,7 +139,7 @@ uvicorn app:app --reload   # start server
 
 ## Notes
 
-- Requires **Python 3.11** (audioop is used for audio resampling; removed in 3.13)
-- TTS latency is ~0.5–1 s; STT utterance-end detection adds ~1 s of silence padding
+- Deepgram Aura outputs mulaw 8 kHz directly, so the TTS path needs no resampling — keeps end-to-end TTS latency under ~500 ms
+- STT utterance-end detection adds ~2 s of silence padding (configurable via Deepgram `utterance_end_ms`)
 - Conversation state is held in memory per WebSocket connection — no Redis needed for single-instance deployments
 - For multi-instance deployments, move session state to Redis

@@ -14,9 +14,10 @@ This system accepts inbound phone calls, guides callers through appliance diagno
 ```
 Caller → Twilio (PSTN) → FastAPI WebSocket (/media-stream)
                               ↓               ↑
-                         Deepgram STT    ElevenLabs TTS
+                       Deepgram STT     Deepgram TTS
+                       (nova-2)         (aura-asteria-en)
                               ↓               ↑
-                         Groq API Key (tool use)
+                         Groq llama-3.3-70b (tool use)
                               ↓
                          PostgreSQL (scheduling)
 ```
@@ -30,7 +31,7 @@ Caller → Twilio (PSTN) → FastAPI WebSocket (/media-stream)
 5. The full utterance — plus conversation history — is sent to Groq.
 6. Groq either returns a text response or emits a `tool_calls` block (OpenAI function-calling format).
 7. If tool use: the handler queries PostgreSQL, returns JSON, and loops back to Groq.
-8. The final text response is sent to ElevenLabs as PCM 16 kHz, downsampled to mulaw 8 kHz with `audioop`, then streamed back to Twilio in 1-second chunks.
+8. The final text response is sent to Deepgram Aura, which returns raw mulaw 8 kHz bytes natively (no resampling). Those bytes are streamed back to Twilio in 1-second chunks.
 9. If the caller utters a goodbye phrase (e.g. "bye", "take care"), Sarah plays a farewell line and hangs up via Twilio's REST API.
 
 ---
@@ -49,11 +50,14 @@ Deepgram offers the best latency-accuracy tradeoff among streaming STT providers
 
 **Alternative considered:** OpenAI Whisper is more accurate on short clips but is not a streaming API; the batch latency (~1–2 s round-trip) would add a perceptible delay between every caller utterance and the agent response.
 
-#### 3.3 Text-to-Speech — ElevenLabs Turbo v2
+#### 3.3 Text-to-Speech — Deepgram Aura (`aura-asteria-en`)
 
-ElevenLabs' `eleven_turbo_v2` model targets ~400 ms time-to-first-audio and produces very natural prosody. The `pcm_16000` output format eliminates container overhead and decodes directly with `audioop.ratecv` + `audioop.lin2ulaw` into Twilio-compatible mulaw with no external binary dependencies.
+Deepgram Aura produces natural-sounding speech at ~300–500 ms time-to-first-audio and — crucially — supports `encoding=mulaw&sample_rate=8000` output directly. That eliminates the PCM-decode + resample + mulaw-encode pipeline that other TTS providers force on you, simplifying the audio path and removing one source of latency. Because Aura uses the same Deepgram account as our STT, deployments need one fewer vendor relationship and one fewer API key to rotate.
 
-**Alternative considered:** Twilio's built-in `<Say>` TTS is zero-latency but uses AWS Polly voices that sound robotic. Google WaveNet has comparable quality but higher per-character pricing at scale.
+**Alternatives considered:**
+- **ElevenLabs Turbo v2** has marginally more expressive prosody, but their free tier blocks data-center IPs (Railway, Fly, Render) with an "unusual activity detected" 401, making it unworkable for cloud deployments without a paid plan.
+- **Twilio's built-in `<Say>`** is zero-latency but uses Polly voices that sound robotic and can't be used inside Media Streams.
+- **OpenAI TTS** has good quality but adds another billing relationship and doesn't natively output mulaw 8 kHz.
 
 #### 3.4 LLM — Groq `llama-3.3-70b-versatile`
 
@@ -71,7 +75,7 @@ PostgreSQL is the right default for relational scheduling data: ACID guarantees 
 
 #### 3.6 Backend — FastAPI + Uvicorn
 
-FastAPI's `async` WebSocket support maps directly onto the concurrent IO pattern (Twilio WS + Deepgram WS + HTTP calls to ElevenLabs/Groq all in one event loop). Uvicorn's lifespan support cleanly manages startup/shutdown. Pydantic-settings handles environment validation at startup, failing fast rather than silently misconfiguring.
+FastAPI's `async` WebSocket support maps directly onto the concurrent IO pattern (Twilio WS + Deepgram STT WS + HTTP calls to Deepgram Aura and Groq, all in one event loop). Uvicorn's lifespan support cleanly manages startup/shutdown. Pydantic-settings handles environment validation at startup, failing fast rather than silently misconfiguring.
 
 ---
 
@@ -106,11 +110,11 @@ Because all work is async and Python's GIL is only relevant for CPU-bound code, 
 | Concern | Current choice | Production alternative |
 |---|---|---|
 | Session state | In-process dict | Redis (multi-instance) |
-| Audio conversion | `audioop` (Python stdlib) | ffmpeg sidecar for more formats |
 | TTS streaming | Full response before speaking | Sentence-boundary streaming for lower TTFA |
 | Barge-in | Clear-on-new-utterance | VAD-driven interruption with Twilio `mark` events |
-| Retry logic | None (single attempt) | Exponential backoff for Deepgram/ElevenLabs |
+| Retry logic | None (single attempt) | Exponential backoff for Deepgram and Groq |
 | Auth | None (webhook open) | Twilio request signature validation |
+| TTS voice variety | Single Aura voice | Per-language or per-persona voice routing |
 
 ---
 
@@ -121,9 +125,9 @@ Because all work is async and Python's GIL is only relevant for CPU-bound code, 
 | Utterance-end detection (Deepgram, `utterance_end_ms=2000`) | ~2 000 ms |
 | LLM inference (Groq, no tools) | ~200–400 ms |
 | LLM inference (Groq, 1 tool call) | ~600–900 ms |
-| TTS synthesis (ElevenLabs turbo) | ~400–700 ms |
-| Audio encode + WebSocket send | ~50 ms |
-| **Total (no tools)** | **~2.7–3.2 s** |
-| **Total (1 tool call)** | **~3.1–3.7 s** |
+| TTS synthesis (Deepgram Aura, native mulaw 8 kHz) | ~300–500 ms |
+| WebSocket send (no audio conversion) | ~20 ms |
+| **Total (no tools)** | **~2.5–2.9 s** |
+| **Total (1 tool call)** | **~2.9–3.4 s** |
 
-`utterance_end_ms` dominates the budget. It is set high (2 000 ms) intentionally — pilot testing showed callers regularly pause 800–1 200 ms mid-sentence, and a more aggressive setting led to the agent interrupting. Groq's LPU hardware keeps LLM inference under 1 second even with tool calls, so the agent's perceived responsiveness is bottlenecked by intentional pause detection rather than model speed.
+`utterance_end_ms` dominates the budget. It is set high (2 000 ms) intentionally — pilot testing showed callers regularly pause 800–1 200 ms mid-sentence, and a more aggressive setting led to the agent interrupting. Groq's LPU hardware keeps LLM inference under 1 second even with tool calls, and Deepgram Aura's native mulaw output shaved ~100 ms off TTS by removing the PCM-resample step. The agent's perceived responsiveness is now bottlenecked by intentional pause detection rather than model or pipeline speed.
